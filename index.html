@@ -7,6 +7,8 @@
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="Le D...">
 <meta name="theme-color" content="#10243A">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
 <title>Le D...</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -62,6 +64,10 @@ body,button,select{font-family:Figtree,system-ui,-apple-system,Segoe UI,sans-ser
 .rep strong{font-size:16px}
 .act button:active,.chip:active,.types button:active{transform:scale(.98)}
 .fab{display:flex;align-items:center;gap:10px}
+#alertbar{padding:0 16px 8px}
+.note2{font-size:13px;color:var(--mute);background:var(--bg);border-radius:12px;padding:10px 12px}
+.bell{width:100%;border:0;border-radius:12px;padding:12px;font-weight:700;background:var(--ink);color:var(--panel);cursor:pointer}
+.ok{font-size:13px;color:var(--green);font-weight:600;padding:2px 0}
 </style>
 </head>
 <body>
@@ -69,7 +75,8 @@ body,button,select{font-family:Figtree,system-ui,-apple-system,Segoe UI,sans-ser
   <header><div class="brand"><svg width="34" height="34" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="9" fill="#10243A"/><path d="M7 21l5-10 4 7 3-5 6 8" fill="none" stroke="#F2A71B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg><div><div class="logo">Le D...</div><div class="tag">Alertes de contrôle en direct</div></div></div><div class="zone"><i class="live"></i>Île-de-France</div></header>
   <div class="chips" id="chips"></div>
   <div class="mapwrap"><svg id="map" viewBox="0 0 360 400" role="img" aria-label="Plan des lignes"></svg></div>
-  <section class="panel"><div class="ph">Signalements actifs<small id="pos"></small></div><ul id="list"></ul></section>
+  <section class="panel"><div class="ph">Signalements actifs<small id="pos"></small></div>
+    <div id="alertbar"></div><ul id="list"></ul></section>
   <button class="fab" id="fab"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>Signaler un contrôle</button>
   <div class="toast" id="toast" role="status"></div>
   <div class="wrap" id="wrap" hidden><div class="scrim" id="scrim"></div>
@@ -142,17 +149,50 @@ async function publish(kind){
   refresh();
 }
 document.addEventListener('click',async e=>{
+  if(e.target.closest('#bell')){enableAlerts();return}
   const f=e.target.closest('[data-f]');if(f){filter=f.dataset.f;renderChips();renderMap();return}
   const v=e.target.closest('[data-v]');
   if(v){if(!await ensureAuth())return;const {error}=await SB.rpc('vote_report',{p_report_id:v.dataset.id,p_value:+v.dataset.v});toast(error?errMsg(error):'Merci, votre avis est pris en compte');refresh();return}
   const t=e.target.closest('[data-t]');if(t)publish(t.dataset.t);
 });
-$('#fab').onclick=openSheet;$('#scrim').onclick=()=>{$('#wrap').hidden=true};
+$('#fab').onclick=openSheet;
+const PUSH_URL='https://avwrphpsbrkwlluueuto.supabase.co/functions/v1/push';
+const pushOK=()=>'serviceWorker' in navigator&&'PushManager' in window&&'Notification' in window;
+const standalone=()=>window.matchMedia('(display-mode: standalone)').matches||navigator.standalone;
+const isIOS=/iPad|iPhone|iPod/.test(navigator.userAgent);
+const b64uToU8=s=>{const b=atob((s+'='.repeat((4-s.length%4)%4)).replace(/-/g,'+').replace(/_/g,'/'));return Uint8Array.from(b,c=>c.charCodeAt(0))};
+async function renderAlertBar(){
+  const el=$('#alertbar');
+  if(isIOS&&!standalone()){el.innerHTML="<div class='note2'>Pour recevoir des alertes : appuyez sur Partager, puis « Sur l'écran d'accueil », et ouvrez l'application depuis son icône.</div>";return}
+  if(!pushOK()){el.innerHTML="<div class='note2'>Les alertes ne sont pas disponibles sur ce navigateur.</div>";return}
+  if(Notification.permission==='denied'){el.innerHTML="<div class='note2'>Alertes bloquées : autorisez les notifications pour cette application dans les réglages du téléphone.</div>";return}
+  let sub=null;try{sub=await (await navigator.serviceWorker.ready).pushManager.getSubscription()}catch(_){}
+  el.innerHTML=sub&&Notification.permission==='granted'?"<div class='ok'>Alertes activées</div>":"<button class='bell' id='bell'>Activer les alertes</button>";
+}
+async function saveDevice(sub){
+  const {data:{session}}=await SB.auth.getSession();if(!session)return;
+  const s=sub||await (await navigator.serviceWorker.ready).pushManager.getSubscription();if(!s)return;
+  await SB.from('devices').upsert({push_token:JSON.stringify(s),user_id:session.user.id,platform:'web',
+    last_location:pos.real?`SRID=4326;POINT(${pos.lon} ${pos.lat})`:null,last_seen:new Date().toISOString(),radius_m:1000},{onConflict:'push_token'});
+}
+async function enableAlerts(){
+  try{
+    if(!await ensureAuth())return;
+    if(await Notification.requestPermission()!=='granted'){toast("Alertes refusées : autorisez les notifications dans les réglages.");return renderAlertBar()}
+    const reg=await navigator.serviceWorker.ready,{publicKey}=await (await fetch(PUSH_URL)).json();
+    const sub=await reg.pushManager.subscribe({userVisibleOnly:true,applicationServerKey:b64uToU8(publicKey)});
+    await saveDevice(sub);toast('Alertes activées');
+  }catch(e){toast("Impossible d'activer les alertes.")}
+  renderAlertBar();
+}$('#scrim').onclick=()=>{$('#wrap').hidden=true};
 (async()=>{
   renderChips();
   const p=await locate();if(p)pos=p;
   await loadStatic();renderMap();
   await refresh();
+  if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js');
+  renderAlertBar();
+  if(pushOK()&&Notification.permission==='granted')saveDevice();
   SB.channel('vigie-reports').on('postgres_changes',{event:'*',schema:'public',table:'reports'},()=>refresh()).subscribe();
   setInterval(refresh,30000);
 })();
